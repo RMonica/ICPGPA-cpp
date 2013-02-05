@@ -22,7 +22,7 @@ namespace NSimpleThreadManager
 
     explicit ThreadManager(int thread_count,ThreadFunc thread_func)
       {
-      m_thread_count = thread_count;
+      m_thread_count = thread_count - 1;
       m_action = THREAD_ACTION_NONE;
       m_running_flag.resize(m_thread_count,false);
       m_thread_func = thread_func;
@@ -93,24 +93,35 @@ namespace NSimpleThreadManager
       if (action < MIN_CUSTOM_THREAD_ACTION)
         return; // action not allowed
 
-      boost::mutex::scoped_lock lock(m_mutex);
-
-      m_action = action;
-      for (int i = 0; i < m_thread_count; i++)
-        m_running_flag[i] = true;
-
-      m_start_cond.notify_all();
-
-      for (int i = 0; i < m_thread_count; i++)
+      // scope only
         {
-        if (m_running_flag[i])
-          m_stop_conds[i].wait(lock);
+        boost::mutex::scoped_lock lock(m_mutex);
+
+        m_action = action;
+        for (int i = 0; i < m_thread_count; i++)
+          m_running_flag[i] = true;
+
+        m_start_cond.notify_all();
+        }
+
+      // use the main thread to simulate thread m_thread_count
+      m_thread_func(m_thread_count,m_action,m_data);
+
+      // scope only
+        {
+        boost::mutex::scoped_lock lock(m_mutex);
+
+        for (int i = 0; i < m_thread_count; i++)
+          {
+          if (m_running_flag[i])
+            m_stop_conds[i].wait(lock);
+          }
         }
       }
 
     DataType & Data() {return m_data; }
 
-    int GetThreadCount() {return m_thread_count; }
+    int GetThreadCount() {return m_thread_count + 1; }
 
     private:
     // forbid empty and copy constructors

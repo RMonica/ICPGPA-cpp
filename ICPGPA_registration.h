@@ -286,10 +286,7 @@ class ICPGPARegistration
       ComputeCentroids(m_clouds,m_sets,m_centroids);
       m_listeners.onComputedCentroids(step,m_centroids);
 
-      if (m_thread_manager.GetThreadCount() > 1)
-        m_thread_manager.ExecuteAction(THREAD_ACTION_PROCESS_CLOUD_SPAN);
-        else
-          TransformCloudSpan(m_clouds,m_sets,m_centroids,m_last_transformations,m_transformations,0,1);
+      m_thread_manager.ExecuteAction(THREAD_ACTION_PROCESS_CLOUD_SPAN);
 
       for (int i = 0; i < m_num_of_clouds; i++)
         m_listeners.onTransformedCloud(step,i,m_last_transformations[i],*(m_clouds[i]));
@@ -427,16 +424,9 @@ class ICPGPARegistration
 
     // create the KdTrees for nearest neighbor search
     trees.resize(cloud_count);
-    if (thread_manager.GetThreadCount() > 1)
-      thread_manager.ExecuteAction(THREAD_ACTION_INIT_KDTREES);
-      else
-        InitKdTreeSpan(clouds,trees,0,1);
+    thread_manager.ExecuteAction(THREAD_ACTION_INIT_KDTREES);
 
-    // do not use multithread if only one thread allowed
-    if (thread_manager.GetThreadCount() > 1)
-      thread_manager.ExecuteAction(THREAD_ACTION_COMPUTE_POINT_GRAPH);
-      else
-        ComputePointGraphSpan(clouds,graph,trees,euclidean_threshold,0,1);
+    thread_manager.ExecuteAction(THREAD_ACTION_COMPUTE_POINT_GRAPH);
     }
 
   /// Finds the independent sets of mutual neighbor point
