@@ -124,6 +124,8 @@ class ICPGPARegistration
   /// main constructor
   /// @param num_of_clouds the number of clouds that
   ///        will be processed by this class
+  /// @param thread_count the number of threads that can be created
+  ///        (default 1, >= 1)
   ICPGPARegistration(int num_of_clouds,int thread_count = 1):
     m_thread_manager(thread_count,ThreadFunction)
     {
@@ -193,22 +195,58 @@ class ICPGPARegistration
 
   /// gets the transformation matrix of a cloud after processing
   /// @param i the index
-  /// @returns a 4x4 matrix
-  const TransformationMatrix & getTransformation(int i)
+  /// @returns an affine matrix
+  const TransformationMatrix & getTransformation(int i) const
     {
     return m_transformations[i];
     }
 
   /// gets all the transformation matrices after processing
-  /// @returns a vector of 4x4 matrices
-  const TransformationMatrixVector & getTransformations()
+  /// @returns a vector of affine matrices
+  const TransformationMatrixVector & getTransformations() const
     {
     return m_transformations;
     }
 
+  /// get the transformations applied during last step
+  /// @returns a vector of affine matrices
+  const TransformationMatrixVector & getLastTransformations() const
+    {
+    return m_last_transformations;
+    }
+
+  /// get the transformation applied during last step to a single cloud
+  /// @param cloud the cloud id
+  /// @returns an affine matrix
+  const TransformationMatrix & getLastTransformation(int cloud) const
+    {
+    return m_last_transformations[cloud];
+    }
+
+  /// Get the graph calculated during last iteration
+  /// @returns the graph
+  const PointNeighGraph & getLastGraph() const
+    {
+    return m_graph;
+    }
+
+  /// Get the sets calculated during last iteration
+  /// @returns the sets
+  const PointNeighCloud & getLastSets() const
+    {
+    return m_sets;
+    }
+
+  /// Get the centroids calculated during last iteration
+  /// @returns a matrix with 3 rows (x,y,z) and a column for each centroid
+  const DynamicPointMatrix & getLastCentroids() const
+    {
+    return m_centroids;
+    }
+
   /// Computes the mean square error after the last iteration
   /// @returns the error
-  Real getMeanSquareError()
+  Real getMeanSquareError() const
     {
     return ComputeMeanSquareError(m_clouds,m_sets,m_centroids);
     }
