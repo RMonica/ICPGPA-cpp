@@ -26,8 +26,12 @@ namespace NSimpleThreadManager
       m_action = THREAD_ACTION_NONE;
       m_running_flag.resize(m_thread_count,false);
       m_thread_func = thread_func;
-      m_stop_conds = new boost::condition_variable[m_thread_count];
-      m_threads = new boost::thread[m_thread_count];
+
+      if (m_thread_count)
+        {
+        m_stop_conds = new boost::condition_variable[m_thread_count];
+        m_threads = new boost::thread[m_thread_count];
+        }
 
         {
         boost::mutex::scoped_lock lock(m_mutex);
