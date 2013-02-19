@@ -47,6 +47,9 @@ class ICPGPARegistration
   typedef Eigen::Matrix<Real,Eigen::Dynamic,Eigen::Dynamic> DynamicMatrix;
   typedef Eigen::Matrix<Real,3,3> Matrix3x3;
 
+  typedef Eigen::Matrix<Real,1,Eigen::Dynamic> DynamicRowVector;
+  typedef Eigen::Matrix<Real,Eigen::Dynamic,1> DynamicColVector;
+
   // this vector contains the neighboring point indices
   // for a single point
   // the index is the cloud of the indexed point
@@ -69,10 +72,29 @@ class ICPGPARegistration
 
   typedef NSimpleThreadManager::ThreadManager<SelfType *> ThreadManager;
 
+  /// This class can be subclassed to override the default weights
+  /// assigned to each set of mutual neighboring points
+  class WeightFunc
+    {
+    public:
+    /// Computes the weight associated to the set
+    /// i. e. calculates the likelihood that the association
+    /// described in the set is correct
+    /// WARNING: may be called by multiple thread simultaneously!
+    /// @param clouds the clouds
+    /// @param cloud_idx the specific cloud for which the weight must be calculated
+    /// @param set the set
+    /// @returns a real value between 0.0 and 1.0
+    virtual Real ComputeWeight(const PointCloudPtrVector & clouds,int cloud_idx,
+      const PointNeighVector & set) = 0;
+    };
+
+  typedef boost::shared_ptr<WeightFunc> WeightFuncPtr;
+
   /// This class can be subclassed to receive events
   /// while the object is processing
   /// All the event handlers will be called by the main thread
-  /// (i. e. the thread that called process)
+  /// (i. e. the thread that called the method "process")
   class Listener
     {
     public:
@@ -261,9 +283,20 @@ class ICPGPARegistration
     m_euclidean_threshold = dist;
     }
 
+  /// Returns a reference to the internal listener container
   ListenerContainer & getListenerContainer()
     {
     return m_listeners;
+    }
+
+  /// Pass a subclass of WeightFunc to this function
+  /// to override the default weight of 1.0 for each
+  /// point correnspondance
+  /// @param func a WeightFuncPtr to the class
+  ///             or WeightFuncPtr(NULL) to unset
+  void setWeightFunction(WeightFuncPtr func)
+    {
+    m_weight_func = func;
     }
 
   /// starts or advance processing
@@ -351,10 +384,14 @@ class ICPGPARegistration
   /// @param clouds the clouds
   /// @param sets the sets
   /// @param centroids the centroids
+  /// @param weights the weights (or NULL if none)
+  /// @param cur_transform the produced and applied current transformations
+  /// @param total_transforms the transformations applied from the beginning
   /// @param span_id the part of the job that must be done
   /// @param total_spans the total number of parts into which the job is subdivided
   static void TransformCloudSpan(PointCloudPtrVector & clouds,const PointNeighCloud & sets,const DynamicPointMatrix centroids,
-    TransformationMatrixVector & cur_transforms,TransformationMatrixVector & total_transforms,int span_id,int total_spans)
+    const WeightFuncPtr & weight_func,TransformationMatrixVector & cur_transforms,
+    TransformationMatrixVector & total_transforms,int span_id,int total_spans)
     {
     int cloud_count = clouds.size();
     int from_cloud_idx = NSimpleThreadManager::GetTaskSpanFirst(cloud_count,span_id,total_spans);
@@ -362,11 +399,16 @@ class ICPGPARegistration
 
     DynamicPointMatrix local_centroids;
     DynamicPointMatrix local_points;
+    DynamicColVector local_weights;
 
     for (int cloud_idx = from_cloud_idx; cloud_idx < to_cloud_idx; cloud_idx++)
       {
       ComputeCentroidsForCloud(clouds,sets,cloud_idx,centroids,local_points,local_centroids);
-      cur_transforms[cloud_idx] = PointsToCentroids(local_points,local_centroids);
+      if (weight_func)
+        ComputeWeights(clouds,sets,cloud_idx,weight_func,local_weights);
+
+      cur_transforms[cloud_idx] = weight_func ? PointsToCentroidsWeighted(local_points,local_centroids,local_weights) :
+        PointsToCentroids(local_points,local_centroids);
       pcl::transformPointCloud(*(clouds[cloud_idx]),*(clouds[cloud_idx]),cur_transforms[cloud_idx]);
       total_transforms[cloud_idx] = cur_transforms[cloud_idx] * total_transforms[cloud_idx];
       }
@@ -605,6 +647,33 @@ class ICPGPARegistration
     local_points.conservativeResize(Eigen::NoChange,counter);
     }
 
+  /// Produces the a weight for each set
+  /// @param clouds the clouds
+  /// @param sets the sets
+  /// @param cloud_idx the specific cloud for which the weights must be computed
+  /// @param weightfunc the pointer to the weight function
+  /// @param weights the produced weights
+  static void ComputeWeights(const PointCloudPtrVector & clouds,const PointNeighCloud & sets,
+    const int cloud_idx,const WeightFuncPtr & weightfunc,DynamicColVector & weights)
+    {
+    const int set_count = sets.size();
+
+    // estimate
+    weights.resize(set_count);
+
+    int actual_count = 0;
+
+    for (int set_idx = 0; set_idx < set_count; set_idx++)
+      if (sets[set_idx][cloud_idx] != NO_POINT)
+        {
+        weights[actual_count] = weightfunc->ComputeWeight(clouds,cloud_idx,sets[set_idx]);
+        actual_count++;
+        }
+
+    // actual resize
+    weights.conservativeResize(actual_count);
+    }
+
   /// Computes the Mean Square distance between the centroids
   /// and the corresponding points for all the clouds
   /// @param clouds the clouds
@@ -647,7 +716,8 @@ class ICPGPARegistration
   /// the two parameters must be of the same size
   /// @param points the points (column vectors) (one point each column)
   /// @param centroids the target positions (column vectors) (one point each column)
-  static Eigen::Affine3f PointsToCentroids(const DynamicPointMatrix & points,
+  /// @returns the transformation matrix
+  static TransformationMatrix PointsToCentroids(const DynamicPointMatrix & points,
     const DynamicPointMatrix & centroids)
     {
     // procrustes
@@ -711,6 +781,59 @@ class ICPGPARegistration
     return result;
     }
 
+  /// computes the best possible affine transformation to bring points in points
+  /// to the centroid centroids using the weights
+  /// the two parameters must be of the same size
+  /// @param points the points (column vectors) (one point each column)
+  /// @param centroids the target positions (column vectors) (one point each column)
+  /// @param weights the weights that must be assigned to each correspondance
+  /// @returns the transformation matrix
+  static TransformationMatrix PointsToCentroidsWeighted(const DynamicPointMatrix & points,
+    const DynamicPointMatrix & centroids,const DynamicColVector & weights)
+    {
+    // weighted procrustes
+
+    // no matches found, return identity
+    int point_count = points.cols();
+    if (!point_count)
+      return Eigen::Affine3f::Identity();
+
+    Real weights_sqr_norm = weights.squaredNorm();
+    if (weights_sqr_norm <= 0.0)
+      return Eigen::Affine3f::Identity(); // no non-0 weights found
+
+    DynamicColVector normalized_weights = weights / weights_sqr_norm;
+
+    DynamicPointMatrix AjMul;
+    AjMul.resize(points.rows(),point_count);
+
+    for (int i = 0; i < point_count; i++)
+      {
+      DynamicRowVector col = - weights[i] * normalized_weights.transpose();
+      col[i] += 1.0;
+
+      AjMul.col(i) = points * col.transpose();
+      }
+
+    Matrix3x3 K = AjMul * centroids.transpose();
+
+    Eigen::JacobiSVD<Matrix3x3> svd_solver = K.jacobiSvd(Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Matrix3x3 U = svd_solver.matrixU();
+    Matrix3x3 V = svd_solver.matrixV();
+
+    RotationMatrix rotation = V * U.transpose();
+    ScaleFactor scale = (rotation.transpose() * AjMul * centroids.transpose()).trace() /
+      (AjMul * points.transpose()).trace();
+    TranslationVector translation = (centroids - (scale * rotation * points)) * normalized_weights;
+
+    TransformationMatrix result = TransformationMatrix::Identity();
+    result.translate(translation);
+    result.scale(scale);
+    result.rotate(rotation);
+
+    return result;
+    }
+
   int GetThreadCount() {return m_thread_manager.GetThreadCount(); }
 
   private:
@@ -726,8 +849,8 @@ class ICPGPARegistration
         InitKdTreeSpan(data->m_clouds,data->m_trees,thread_id,data->GetThreadCount());
         break;
       case THREAD_ACTION_PROCESS_CLOUD_SPAN:
-        TransformCloudSpan(data->m_clouds,data->m_sets,data->m_centroids,data->m_last_transformations,
-          data->m_transformations,thread_id,data->GetThreadCount());
+        TransformCloudSpan(data->m_clouds,data->m_sets,data->m_centroids,data->m_weight_func,
+        data->m_last_transformations,data->m_transformations,thread_id,data->GetThreadCount());
         break;
       default:
         break;
@@ -752,6 +875,8 @@ class ICPGPARegistration
   ThreadManager m_thread_manager;
 
   ListenerContainer m_listeners;
+
+  WeightFuncPtr m_weight_func;
   };
 
 } // pcl
