@@ -1,4 +1,12 @@
-// RMonica
+/// @file
+/// @author RMonica
+///
+/// C++ implementation of the algorithm described in<BR>
+/// "R.Toldo, A.Beinat, F.Crosilla. Global registration of multiple point clouds
+/// embedding the Generalized Procrustes Analysis into an ICP framework.
+/// 3DPVT2010 Conference, to appear"<BR>
+/// using the Point Cloud Library.
+///
 #ifndef ICPGPA_REGISTRATION_H_
 #define ICPGPA_REGISTRATION_H_
 
@@ -21,6 +29,10 @@
 namespace pcl
 {
 
+/// This class can be used to refine the alignment (register)
+/// of multiple partially-aligned point clouds
+/// using their overlapping regions.
+/// @tparam PointT the point type.
 template <typename PointT>
 class ICPGPARegistration
   {
@@ -50,17 +62,17 @@ class ICPGPARegistration
   typedef Eigen::Matrix<Real,1,Eigen::Dynamic> DynamicRowVector;
   typedef Eigen::Matrix<Real,Eigen::Dynamic,1> DynamicColVector;
 
-  // this vector contains the neighboring point indices
-  // for a single point
-  // the index is the cloud of the indexed point
+  /// This vector type contains the neighboring points indices
+  /// for a single point
+  /// indexed by the index of the cloud that contains the destination point.
   typedef std::vector<int> PointNeighVector;
-  // this vector contains the neighbour relations
-  // for all the points in a single cloud
-  // the index is the index of the point in the cloud
+  /// This vector type contains the neighbour relations
+  /// for all the points in a single cloud.
+  /// Indexed by the index of the point in the cloud.
   typedef std::vector<PointNeighVector> PointNeighCloud;
-  // this vector contains the neighbour relations
-  // for all the points
-  // the index is the cloud of the source point
+  /// This vector type contains the neighbour relations
+  /// for all the points.
+  /// Indexed by the index of the cloud that contains the source point.
   typedef std::vector<PointNeighCloud> PointNeighGraph;
 
   typedef KdTreeFLANN<PointT> KdTree;
@@ -73,17 +85,17 @@ class ICPGPARegistration
   typedef NSimpleThreadManager::ThreadManager<SelfType *> ThreadManager;
 
   /// This class can be subclassed to override the default weights
-  /// assigned to each set of mutual neighboring points
+  /// assigned to each set of mutual neighboring points.
   class WeightFunc
     {
     public:
     /// Computes the weight associated to the set
     /// i. e. calculates the likelihood that the association
-    /// described in the set is correct
-    /// WARNING: may be called by multiple thread simultaneously!
-    /// @param clouds the clouds
-    /// @param cloud_idx the specific cloud for which the weight must be calculated
-    /// @param set the set
+    /// described in the set is correct.
+    /// @warning may be called by multiple thread simultaneously!
+    /// @param[in] clouds the clouds
+    /// @param[in] cloud_idx the specific cloud for which the weight must be calculated
+    /// @param[in] set the set
     /// @returns a real value between 0.0 and 1.0
     virtual Real ComputeWeight(const PointCloudPtrVector & clouds,int cloud_idx,
       const PointNeighVector & set) = 0;
@@ -92,9 +104,10 @@ class ICPGPARegistration
   typedef boost::shared_ptr<WeightFunc> WeightFuncPtr;
 
   /// This class can be subclassed to receive events
-  /// while the object is processing
+  /// while the object is processing.
   /// All the event handlers will be called by the main thread
-  /// (i. e. the thread that called the method "process")
+  /// (i. e. the thread that called the method "process").
+  /// All the listeners will be called by the main thread.
   class Listener
     {
     public:
@@ -111,8 +124,8 @@ class ICPGPARegistration
 
   typedef boost::shared_ptr<Listener> ListenerPtr;
 
-  /// this class is instantiated internally and contains the pointers to the listeners
-  /// can be accessed and modified by reference using getListenerContainer()
+  /// This class is instantiated internally and contains the pointers to the listeners.
+  /// It can be accessed and modified by reference using getListenerContainer().
   class ListenerContainer: public Listener, public std::vector<ListenerPtr>
     {
     public:
@@ -135,6 +148,7 @@ class ICPGPARegistration
       {for (size_type i = 0; i < this->size(); i++) (*this)[i]->onTransformedCloud(iteration,cloudid,matrix,newcloud); }
     };
 
+  /// The actions that may be requested to the thread manager.
   enum ThreadActions
     {
     THREAD_ACTION_FIRST  = NSimpleThreadManager::MIN_CUSTOM_THREAD_ACTION,
@@ -143,11 +157,11 @@ class ICPGPARegistration
     THREAD_ACTION_PROCESS_CLOUD_SPAN  = THREAD_ACTION_FIRST + 2
     };
 
-  /// main constructor
-  /// @param num_of_clouds the number of clouds that
-  ///        will be processed by this class
-  /// @param thread_count the number of threads that can be created
-  ///        (default 1, >= 1)
+  /// Main constructor.
+  /// @param[in] num_of_clouds the number of clouds that
+  ///        will be processed by this class.
+  /// @param[in] thread_count the number of threads that can be created
+  ///        (default 1, >= 1).
   ICPGPARegistration(int num_of_clouds,int thread_count = 1):
     m_thread_manager(thread_count,ThreadFunction)
     {
@@ -164,21 +178,25 @@ class ICPGPARegistration
     m_clouds.resize(num_of_clouds);
     }
 
+  /// Destructor.
   ~ICPGPARegistration()
     {
 
     }
 
-  /// get the number of clouds
-  /// @returns the cloud count
+  /// Gets the number of clouds.
+  /// @returns the cloud count.
   int getCloudCount() const
     {
     return m_num_of_clouds;
     }
 
-  /// sets all the clouds at once
-  /// @param clouds the new clouds
-  ///        must be of the same size as num_of_clouds
+  /// Sets all the clouds at once.
+  /// @warning the clouds will be changed while processing,
+  ///          so they are both output and input clouds.
+  /// @param[in] clouds the new clouds,
+  ///        it must contain the number of elements
+  ///        specified in the constructor.
   void setClouds(const PointCloudPtrVector clouds)
     {
     if (int(clouds.size()) != m_num_of_clouds)
@@ -187,11 +205,11 @@ class ICPGPARegistration
     m_clouds = clouds;
     }
 
-  /// set the cloud at an index
-  /// WARNING: the cloud will be changed while processing
-  ///          so it acts like both an output and an input cloud
-  /// @param i the index (0 based)
-  /// @param cloud the cloud
+  /// Set the cloud at an index.
+  /// @warning the cloud will be changed while processing,
+  ///          so it is both an output and an input cloud.
+  /// @param[in] i the index (0 based).
+  /// @param[in] cloud the cloud.
   void setCloud(int i,const PointCloudPtr cloud)
     {
     if (i >= m_num_of_clouds || i < 0)
@@ -200,107 +218,108 @@ class ICPGPARegistration
     m_clouds[i] = cloud;
     }
 
-  /// gets the cloud at a certain index
-  /// @param i the index
-  /// @returns the cloud at index i
+  /// Gets the cloud at a certain index.
+  /// @param[in] i the index.
+  /// @returns the cloud at index @a i.
   const PointCloudPtr getCloud(int i) const
     {
     return m_clouds[i];
     }
 
-  /// gets all the clouds at once
-  /// @returns a 0 based vector with all the clouds
+  /// Gets all the clouds at once.
+  /// @returns a 0 based vector containing the pointers to the clouds.
   const PointCloudPtrVector & getClouds() const
     {
     return m_clouds;
     }
 
-  /// gets the transformation matrix of a cloud after processing
-  /// @param i the index
-  /// @returns an affine matrix
+  /// Gets the transformation matrix of a cloud after processing.
+  /// @param[in] i the index of the cloud.
+  /// @returns an affine matrix.
   const TransformationMatrix & getTransformation(int i) const
     {
     return m_transformations[i];
     }
 
-  /// gets all the transformation matrices after processing
-  /// @returns a vector of affine matrices
+  /// Gets all the transformation matrices after processing.
+  /// @returns a vector of affine matrices.
   const TransformationMatrixVector & getTransformations() const
     {
     return m_transformations;
     }
 
-  /// get the transformations applied during last step
-  /// @returns a vector of affine matrices
+  /// Gets the transformations applied during last step.
+  /// @returns a vector of affine matrices.
   const TransformationMatrixVector & getLastTransformations() const
     {
     return m_last_transformations;
     }
 
-  /// get the transformation applied during last step to a single cloud
-  /// @param cloud the cloud id
-  /// @returns an affine matrix
+  /// Gets the transformation applied during last step to a single cloud
+  /// @param[in] cloud the cloud id.
+  /// @returns an affine matrix.
   const TransformationMatrix & getLastTransformation(int cloud) const
     {
     return m_last_transformations[cloud];
     }
 
-  /// Get the graph calculated during last iteration
-  /// @returns the graph
+  /// Gets the graph calculated during last iteration.
+  /// @returns the graph.
   const PointNeighGraph & getLastGraph() const
     {
     return m_graph;
     }
 
-  /// Get the sets calculated during last iteration
-  /// @returns the sets
+  /// Gets the sets calculated during last iteration.
+  /// @returns the sets.
   const PointNeighCloud & getLastSets() const
     {
     return m_sets;
     }
 
-  /// Get the centroids calculated during last iteration
-  /// @returns a matrix with 3 rows (x,y,z) and a column for each centroid
+  /// Gets the centroids calculated during last iteration.
+  /// @returns a matrix with 3 rows (x,y,z) and a column for each centroid.
   const DynamicPointMatrix & getLastCentroids() const
     {
     return m_centroids;
     }
 
-  /// Computes the mean square error after the last iteration
-  /// @returns the error
+  /// Computes the mean square error after the last iteration.
+  /// @returns the error.
   Real getMeanSquareError() const
     {
     return ComputeMeanSquareError(m_clouds,m_sets,m_centroids);
     }
 
-  /// Set a maximum distance for point matches
-  /// point matches with higher distance will be discarded
-  /// @param dist the maximum distance
-  ///             if negative, the check will be ignored
-  /// default value is -1.0 (check ignored)
+  /// Sets a maximum distance for point matches.
+  /// Point matches with higher distances will be discarded.
+  /// @param[in] dist the maximum distance.
+  ///             If negative, the condition will be ignored.
+  ///             Default value is -1.0 (so it's ignored by default).
   void setMaxMatchDistance(Real dist)
     {
     m_euclidean_threshold = dist;
     }
 
-  /// Returns a reference to the internal listener container
+  /// @returns a reference to the internal listener container.
   ListenerContainer & getListenerContainer()
     {
     return m_listeners;
     }
 
-  /// Pass a subclass of WeightFunc to this function
+  /// Pass a subclass of WeightFunc to this method
   /// to override the default weight of 1.0 for each
-  /// point correnspondance
-  /// @param func a WeightFuncPtr to the class
-  ///             or WeightFuncPtr(NULL) to unset
+  /// point correspondance.
+  /// @param[in] func a WeightFuncPtr to the class,
+  ///             or WeightFuncPtr(NULL) to restore
+  ///             the default weight.
   void setWeightFunction(WeightFuncPtr func)
     {
     m_weight_func = func;
     }
 
-  /// starts or advance processing
-  /// @param steps the number of cycles
+  /// Starts or advance processing.
+  /// @param[in] steps the number of cycles to perform.
   void process(int steps)
     {
     if (steps <= 0)
@@ -310,7 +329,7 @@ class ICPGPARegistration
       {
       m_listeners.onStartIteration(step);
 
-      ComputePointGraph(m_clouds,m_graph,m_trees,m_euclidean_threshold,m_thread_manager);
+      ComputePointGraph(m_clouds,m_graph,m_trees,m_thread_manager);
       m_listeners.onComputedGraph(step,m_graph);
 
       FindIndependentSets(m_graph,m_sets);
@@ -327,14 +346,18 @@ class ICPGPARegistration
       }
     }
 
+  /// This value will be inserted into PointNeighVectors
+  /// to mark that there is no point in the set for the cloud
+  /// at that index.
   static const int NO_POINT = -1;
 
-  /// Executes the logic of ComputePointGraph for only a part of the points
-  /// @param clouds the clouds
-  /// @param graph the partly produced graph
-  /// @param trees the search trees that may be used
-  /// @param span_id the part of the job that must be calculated
-  /// @param total_spans the total number of parts into which the job is subdivided
+  /// Computes the point graph for only a part of the points.
+  /// @param[in] clouds the clouds.
+  /// @param[out] graph the partially produced graph.
+  /// @param[in] trees the search trees that may be used.
+  /// @param[in] euclidean_threshold correspondances with distance higher than this will be discarded.
+  /// @param[in] span_id the part of the job that must be calculated.
+  /// @param[in] total_spans the total number of parts into which the job is subdivided.
   static void ComputePointGraphSpan(const PointCloudPtrVector & clouds,PointNeighGraph & graph,
     const std::vector<KdTreePtr> & trees,Real euclidean_threshold,int span_id,int total_spans)
     {
@@ -380,15 +403,15 @@ class ICPGPARegistration
       }
     }
 
-  /// Computes and applies the transformation to a subset of the clouds
-  /// @param clouds the clouds
-  /// @param sets the sets
-  /// @param centroids the centroids
-  /// @param weights the weights (or NULL if none)
-  /// @param cur_transform the produced and applied current transformations
-  /// @param total_transforms the transformations applied from the beginning
-  /// @param span_id the part of the job that must be done
-  /// @param total_spans the total number of parts into which the job is subdivided
+  /// Computes and applies the transformations to a subset of the clouds
+  /// @param[in] clouds the clouds.
+  /// @param[in] sets the sets.
+  /// @param[in] centroids the centroids.
+  /// @param[in] weight_func the weight function, or WeightFuncPtr(NULL) if none.
+  /// @param[out] cur_transforms the transformations applied during this iteration.
+  /// @param[in,out] total_transforms the product of the transformations applied from the beginning of processing.
+  /// @param[in] span_id the part of the job that must be done.
+  /// @param[in] total_spans the total number of parts into which the job is subdivided.
   static void TransformCloudSpan(PointCloudPtrVector & clouds,const PointNeighCloud & sets,const DynamicPointMatrix centroids,
     const WeightFuncPtr & weight_func,TransformationMatrixVector & cur_transforms,
     TransformationMatrixVector & total_transforms,int span_id,int total_spans)
@@ -414,11 +437,11 @@ class ICPGPARegistration
       }
     }
 
-  /// Initializes a subset of the KdTrees
-  /// @param clouds the clouds
-  /// @param trees the trees
-  /// @param span_id the part of the job that must be done
-  /// @param total_spans the total number of parts into which the job is subdivided
+  /// Initializes a subset of the KdTrees.
+  /// @param[in] clouds the clouds.
+  /// @param[out] trees the produced trees.
+  /// @param[in] span_id the part of the job that must be done.
+  /// @param[in] total_spans the total number of parts into which the job is subdivided.
   static void InitKdTreeSpan(const PointCloudPtrVector & clouds,std::vector<KdTreePtr> & trees,
     int span_id,int total_spans)
     {
@@ -433,18 +456,20 @@ class ICPGPARegistration
       }
     }
 
-  /// compute the mutual nearest neighborhood relation graph
-  ///
+  /// Computes the mutual nearest neighborhood relation graph.
+  /// <BR>
   /// For each cloud and for each point in that cloud
   /// a vector of int is produced, with one element for each cloud.
   /// Each element contains the index of the mutual nearest neighbor
   /// in the cloud for the point, or NO_POINT if none found.
   /// NOTE: a point is not the nearest neighbor of itself,
   ///       so graph[a][b][a] is always NO_POINT.
-  /// @param clouds the clouds
-  /// @param graph the graph produced
+  /// @param[in] clouds the clouds.
+  /// @param[out] graph the graph produced.
+  /// @param[in] trees the KdTrees that must be used for searching.
+  /// @param[in,out] thread_manager the thread manager.
   static void ComputePointGraph(const PointCloudPtrVector & clouds,PointNeighGraph & graph,
-    std::vector<KdTreePtr> &trees,Real euclidean_threshold,ThreadManager & thread_manager)
+    std::vector<KdTreePtr> &trees,ThreadManager & thread_manager)
     {
     const int cloud_count = clouds.size();
     if (cloud_count <= 0)
@@ -471,15 +496,15 @@ class ICPGPARegistration
     thread_manager.ExecuteAction(THREAD_ACTION_COMPUTE_POINT_GRAPH);
     }
 
-  /// Finds the independent sets of mutual neighbor point
+  /// Finds the independent sets of mutual neighbor point,
   /// excluding: sets with only one point
-  ///            and set with more than one point of the same cloud
+  ///            and sets with more than one point of the same cloud.
   /// Produces an array of sets
   /// each set is represented by a vector of integer with num_of_clouds elements
   /// the element at position i is the index of the point
-  /// that belongs to that set for cloud i, or NO_POINT if none found
-  /// @param graph the neighborhood graph
-  /// @param sets the array of produced sets (cleared at the beginning)
+  /// that belongs to that set for cloud i, or NO_POINT if none found.
+  /// @param[in] graph the neighborhood graph.
+  /// @param[out] sets the array of produced sets.
   static void FindIndependentSets(const PointNeighGraph & graph,PointNeighCloud & sets)
     {
     // using floodfill labelling for sets
@@ -569,18 +594,18 @@ class ICPGPARegistration
       }
     }
 
-  /// convert a point from PointT to PointVector
+  /// Converts a point from @a PointT to @a PointVector .
   static PointVector PointTToEigen(const PointT & point)
     {
     return PointVector(point.x,point.y,point.z);
     }
 
-  /// Computes the centroids for the sets
-  /// produces a matrix composed by a column vector
-  /// for each set, in the same order
-  /// @param clouds the clouds
-  /// @param sets the sets
-  /// @param centroids the output matrix
+  /// Computes the centroids for the sets.
+  /// Produces a matrix composed by a column vector
+  /// for each set, in the same order.
+  /// @param[in] clouds the clouds.
+  /// @param[in] sets the sets.
+  /// @param[out] centroids the matrix produced.
   static void ComputeCentroids(const PointCloudPtrVector & clouds,const PointNeighCloud & sets,
     DynamicPointMatrix & centroids)
     {
@@ -607,13 +632,13 @@ class ICPGPARegistration
     }
 
   /// Produces two matrices, one containing the interesting points of the cloud
-  /// and the other the centroids to which the points should be moved
-  /// @param clouds the clouds (only cloud cloud_idx will be used)
-  /// @param sets the independent sets
-  /// @param cloud_idx the index of the cloud in clouds that must be used
-  /// @param centroids the centroid matrix, one for each set in sets
-  /// @param local_points the interesting points
-  /// @param local_centroids the corresponding centroids
+  /// and the other the corresponding centroids to which the points should be moved.
+  /// @param[in] clouds the clouds (only cloud cloud_idx will be used).
+  /// @param[in] sets the independent sets.
+  /// @param[in] cloud_idx the index of the cloud in clouds that must be used.
+  /// @param[in] centroids the centroid matrix, one for each set in sets.
+  /// @param[out] local_points the interesting points.
+  /// @param[out] local_centroids the corresponding centroids.
   static void ComputeCentroidsForCloud(const PointCloudPtrVector & clouds,const PointNeighCloud & sets,
     const int cloud_idx,const DynamicPointMatrix & centroids,
     DynamicPointMatrix & local_points,DynamicPointMatrix & local_centroids)
@@ -647,12 +672,13 @@ class ICPGPARegistration
     local_points.conservativeResize(Eigen::NoChange,counter);
     }
 
-  /// Produces the a weight for each set
-  /// @param clouds the clouds
-  /// @param sets the sets
-  /// @param cloud_idx the specific cloud for which the weights must be computed
-  /// @param weightfunc the pointer to the weight function
-  /// @param weights the produced weights
+  /// Produces the a weight for each set.
+  /// @param[in] clouds the clouds.
+  /// @param[in] sets the sets.
+  /// @param[in] cloud_idx the specific cloud for which the weights must be computed.
+  /// @param[in] weightfunc the pointer to the weight function.
+  /// @param[out] weights the produced weights, in a column vector, in the same order as
+  ///        the sets.
   static void ComputeWeights(const PointCloudPtrVector & clouds,const PointNeighCloud & sets,
     const int cloud_idx,const WeightFuncPtr & weightfunc,DynamicColVector & weights)
     {
@@ -675,10 +701,11 @@ class ICPGPARegistration
     }
 
   /// Computes the Mean Square distance between the centroids
-  /// and the corresponding points for all the clouds
-  /// @param clouds the clouds
-  /// @param sets the independent sets
-  /// @param centroids the centroids, one for each set
+  /// and the corresponding points for all the clouds.
+  /// @param[in] clouds the clouds.
+  /// @param[in] sets the independent sets.
+  /// @param[in] centroids the centroids, one for each set.
+  /// @returns the mean square error.
   static Real ComputeMeanSquareError(const PointCloudPtrVector & clouds,const PointNeighCloud & sets,
     const DynamicPointMatrix & centroids)
     {
@@ -711,12 +738,12 @@ class ICPGPARegistration
     return error;
     }
 
-  /// computes the best possible affine transformation to bring points in points
-  /// to the centroid centroids
-  /// the two parameters must be of the same size
-  /// @param points the points (column vectors) (one point each column)
-  /// @param centroids the target positions (column vectors) (one point each column)
-  /// @returns the transformation matrix
+  /// Computes the best possible affine transformation to bring points in points
+  /// to the centroid centroids.
+  /// The two parameters must be of the same size.
+  /// @param[in] points the points (column vectors) (one point each column).
+  /// @param[in] centroids the target positions (column vectors) (one point each column).
+  /// @returns the transformation matrix.
   static TransformationMatrix PointsToCentroids(const DynamicPointMatrix & points,
     const DynamicPointMatrix & centroids)
     {
@@ -781,13 +808,13 @@ class ICPGPARegistration
     return result;
     }
 
-  /// computes the best possible affine transformation to bring points in points
-  /// to the centroid centroids using the weights
-  /// the two parameters must be of the same size
-  /// @param points the points (column vectors) (one point each column)
-  /// @param centroids the target positions (column vectors) (one point each column)
-  /// @param weights the weights that must be assigned to each correspondance
-  /// @returns the transformation matrix
+  /// Computes the best possible affine transformation to bring points in points
+  /// to the centroid centroids using the weights.
+  /// The two parameters must be of the same size.
+  /// @param[in] points the points (column vectors) (one point each column).
+  /// @param[in] centroids the target positions (column vectors) (one point each column).
+  /// @param[in] weights the weights that must be assigned to each correspondance.
+  /// @returns the transformation matrix.
   static TransformationMatrix PointsToCentroidsWeighted(const DynamicPointMatrix & points,
     const DynamicPointMatrix & centroids,const DynamicColVector & weights)
     {
@@ -804,16 +831,10 @@ class ICPGPARegistration
 
     DynamicColVector normalized_weights = weights / weights_sqr_norm;
 
-    DynamicPointMatrix AjMul;
-    AjMul.resize(points.rows(),point_count);
-
-    for (int i = 0; i < point_count; i++)
-      {
-      DynamicRowVector col = - weights[i] * normalized_weights.transpose();
-      col[i] += 1.0;
-
-      AjMul.col(i) = points * col.transpose();
-      }
+    //   points * (Identity - weights * normalized_weights.transpose()) =
+    // = points * Identity - points * weights * normalized_weights.transpose() =
+    // = points - (points * weights) * normalized_weights.transpose()
+    DynamicPointMatrix AjMul = points - points * weights * normalized_weights.transpose();
 
     Matrix3x3 K = AjMul * centroids.transpose();
 
@@ -834,9 +855,15 @@ class ICPGPARegistration
     return result;
     }
 
+  /// Returns the number of thread that will be used,
+  /// as passed to the constructor.
   int GetThreadCount() {return m_thread_manager.GetThreadCount(); }
 
   private:
+  // disable default constructors.
+  ICPGPARegistration() {}
+  ICPGPARegistration(const SelfType & other) {}
+
   static void ThreadFunction(int thread_id,int action,SelfType * &data)
     {
     switch (action)
