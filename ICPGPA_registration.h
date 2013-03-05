@@ -129,7 +129,7 @@ class ICPGPARegistration
   class ListenerContainer: public Listener, public std::vector<ListenerPtr>
     {
     public:
-    using typename std::vector<ListenerPtr>::size_type;
+    typedef typename std::vector<ListenerPtr>::size_type size_type;
 
     virtual void onStartIteration(int iteration)
       {for (size_type i = 0; i < this->size(); i++) (*this)[i]->onStartIteration(iteration); }
