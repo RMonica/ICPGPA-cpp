@@ -56,8 +56,11 @@ namespace NSimpleThreadManager
       for (int i = 0; i < m_thread_count; i++)
         m_threads[i].join();
 
-      delete [] m_threads;
-      delete [] m_stop_conds;
+      if (m_thread_count)
+        {
+        delete [] m_threads;
+        delete [] m_stop_conds;
+        }
       }
 
     static void ThreadProc(ThreadManager * info,int thread_id)
