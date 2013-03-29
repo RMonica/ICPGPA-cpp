@@ -24,8 +24,6 @@
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/common/transforms.h>
 
-#include "thread_manager.h"
-
 namespace pcl
 {
 
@@ -82,8 +80,6 @@ class ICPGPARegistration
 
   typedef ICPGPARegistration<PointT> SelfType;
 
-  typedef NSimpleThreadManager::ThreadManager<SelfType *> ThreadManager;
-
   /// This class can be subclassed to override the default weights
   /// assigned to each set of mutual neighboring points.
   class WeightFunc
@@ -107,7 +103,8 @@ class ICPGPARegistration
   /// while the object is processing.
   /// All the event handlers will be called by the main thread
   /// (i. e. the thread that called the method "process").
-  /// All the listeners will be called by the main thread.
+  /// All the listeners will be called by the main thread,
+  /// except onTransformedCloud.
   class Listener
     {
     public:
@@ -148,28 +145,16 @@ class ICPGPARegistration
       {for (size_type i = 0; i < this->size(); i++) (*this)[i]->onTransformedCloud(iteration,cloudid,matrix,newcloud); }
     };
 
-  /// The actions that may be requested to the thread manager.
-  enum ThreadActions
-    {
-    THREAD_ACTION_FIRST  = NSimpleThreadManager::MIN_CUSTOM_THREAD_ACTION,
-    THREAD_ACTION_COMPUTE_POINT_GRAPH = THREAD_ACTION_FIRST + 0,
-    THREAD_ACTION_INIT_KDTREES        = THREAD_ACTION_FIRST + 1,
-    THREAD_ACTION_PROCESS_CLOUD_SPAN  = THREAD_ACTION_FIRST + 2
-    };
-
   /// Main constructor.
   /// @param[in] num_of_clouds the number of clouds that
   ///        will be processed by this class.
-  /// @param[in] thread_count the number of threads that can be created
-  ///        (default 1, >= 1).
-  ICPGPARegistration(int num_of_clouds,int thread_count = 1):
-    m_thread_manager(thread_count,ThreadFunction)
+  /// @param[in] thread_count deprecated, left here only for
+  ///            backward compatibility.
+  ICPGPARegistration(int num_of_clouds,int /*thread_count*/ = 1)
     {
     m_num_of_clouds = num_of_clouds;
 
     m_euclidean_threshold = -1.0;
-
-    m_thread_manager.Data() = this;
 
     // initialize with null transformation
     m_transformations.resize(num_of_clouds,TransformationMatrix::Identity());
@@ -329,7 +314,7 @@ class ICPGPARegistration
       {
       m_listeners.onStartIteration(step);
 
-      ComputePointGraph(m_clouds,m_graph,m_trees,m_thread_manager);
+      ComputePointGraph(m_clouds,m_graph,m_trees,m_euclidean_threshold);
       m_listeners.onComputedGraph(step,m_graph);
 
       FindIndependentSets(m_graph,m_sets);
@@ -338,10 +323,11 @@ class ICPGPARegistration
       ComputeCentroids(m_clouds,m_sets,m_centroids);
       m_listeners.onComputedCentroids(step,m_centroids);
 
-      m_thread_manager.ExecuteAction(THREAD_ACTION_PROCESS_CLOUD_SPAN);
-
+      TransformClouds(m_clouds,m_sets,m_centroids,m_weight_func,m_last_transformations,m_transformations);
+      #pragma omp parallel for
       for (int i = 0; i < m_num_of_clouds; i++)
         m_listeners.onTransformedCloud(step,i,m_last_transformations[i],*(m_clouds[i]));
+
       m_listeners.onEndIteration(step);
       }
     }
@@ -351,28 +337,91 @@ class ICPGPARegistration
   /// at that index.
   static const int NO_POINT = -1;
 
-  /// Computes the point graph for only a part of the points.
+  /// Computes and applies the transformations to the clouds
   /// @param[in] clouds the clouds.
-  /// @param[out] graph the partially produced graph.
-  /// @param[in] trees the search trees that may be used.
-  /// @param[in] euclidean_threshold correspondances with distance higher than this will be discarded.
-  /// @param[in] span_id the part of the job that must be calculated.
-  /// @param[in] total_spans the total number of parts into which the job is subdivided.
-  static void ComputePointGraphSpan(const PointCloudPtrVector & clouds,PointNeighGraph & graph,
-    const std::vector<KdTreePtr> & trees,Real euclidean_threshold,int span_id,int total_spans)
+  /// @param[in] sets the sets.
+  /// @param[in] centroids the centroids.
+  /// @param[in] weight_func the weight function, or WeightFuncPtr(NULL) if none.
+  /// @param[out] cur_transforms the transformations applied during this iteration.
+  /// @param[in,out] total_transforms the product of the transformations applied from the beginning of processing.
+  static void TransformClouds(PointCloudPtrVector & clouds,const PointNeighCloud & sets,const DynamicPointMatrix centroids,
+    const WeightFuncPtr & weight_func,TransformationMatrixVector & cur_transforms,TransformationMatrixVector & total_transforms)
     {
+    int cloud_count = clouds.size();
+
+    #pragma omp parallel
+      {
+      DynamicPointMatrix local_centroids;
+      DynamicPointMatrix local_points;
+      DynamicColVector local_weights;
+
+      #pragma omp for
+      for (int cloud_idx = 0; cloud_idx < cloud_count; cloud_idx++)
+        {
+        ComputeCentroidsForCloud(clouds,sets,cloud_idx,centroids,local_points,local_centroids);
+        if (weight_func)
+          ComputeWeights(clouds,sets,cloud_idx,weight_func,local_weights);
+
+        cur_transforms[cloud_idx] = weight_func ? PointsToCentroidsWeighted(local_points,local_centroids,local_weights) :
+          PointsToCentroids(local_points,local_centroids);
+        pcl::transformPointCloud(*(clouds[cloud_idx]),*(clouds[cloud_idx]),cur_transforms[cloud_idx]);
+        total_transforms[cloud_idx] = cur_transforms[cloud_idx] * total_transforms[cloud_idx];
+        }
+      }
+    }
+
+  /// Computes the mutual nearest neighborhood relation graph.
+  /// <BR>
+  /// For each cloud and for each point in that cloud
+  /// a vector of int is produced, with one element for each cloud.
+  /// Each element contains the index of the mutual nearest neighbor
+  /// in the cloud for the point, or NO_POINT if none found.
+  /// NOTE: a point is not the nearest neighbor of itself,
+  ///       so graph[a][b][a] is always NO_POINT.
+  /// @param[in] clouds the clouds.
+  /// @param[out] graph the graph produced.
+  /// @param[in] trees the KdTrees that must be used for searching.
+  /// @param[in] euclidean_threshold the maximum distance for matches.
+  static void ComputePointGraph(const PointCloudPtrVector & clouds,PointNeighGraph & graph,
+    std::vector<KdTreePtr> &trees,Real euclidean_threshold)
+    {
+    const int cloud_count = clouds.size();
+    if (cloud_count <= 0)
+      return;
+
+    // reinitialize the graph
+    graph.resize(cloud_count);
+    for (int i = 0; i < cloud_count; i++)
+      {
+      int cloudsize = clouds[i]->size();
+      graph[i].resize(cloudsize);
+      for (int h = 0; h < cloudsize; h++)
+        {
+        graph[i][h].resize(cloud_count);
+        for (int k = 0; k < cloud_count; k++)
+          graph[i][h][k] = NO_POINT;
+        }
+      }
+
+    // create the KdTrees for nearest neighbor search
+    trees.resize(cloud_count);
+    #pragma omp parallel for
+    for (int i = 0; i < cloud_count; i++)
+      {
+      trees[i] = KdTreePtr(new KdTree());
+      trees[i]->setInputCloud(clouds[i]);
+      }
+
     bool need_threshold = euclidean_threshold >= 0.0;
     Real sqr_threshold = euclidean_threshold * euclidean_threshold;
 
-    int cloud_count = clouds.size();
     for (int source_cloud_idx = 0; source_cloud_idx < cloud_count; source_cloud_idx++)
       {
       int source_cloud_size = clouds[source_cloud_idx]->size();
-      int from_point_idx = NSimpleThreadManager::GetTaskSpanFirst(source_cloud_size,span_id,total_spans);
-      int to_point_idx = NSimpleThreadManager::GetTaskSpanFirst(source_cloud_size,span_id + 1,total_spans);
-      for (int dest_cloud_idx = source_cloud_idx + 1; dest_cloud_idx < cloud_count; dest_cloud_idx++)
+      #pragma omp parallel for
+      for (int src_point_idx = 0; src_point_idx < source_cloud_size; src_point_idx++)
         {
-        for (int src_point_idx = from_point_idx; src_point_idx < to_point_idx; src_point_idx++)
+        for (int dest_cloud_idx = source_cloud_idx + 1; dest_cloud_idx < cloud_count; dest_cloud_idx++)
           {
           int dest_point_idx;
           int r;
@@ -401,99 +450,6 @@ class ICPGPARegistration
           }
         }
       }
-    }
-
-  /// Computes and applies the transformations to a subset of the clouds
-  /// @param[in] clouds the clouds.
-  /// @param[in] sets the sets.
-  /// @param[in] centroids the centroids.
-  /// @param[in] weight_func the weight function, or WeightFuncPtr(NULL) if none.
-  /// @param[out] cur_transforms the transformations applied during this iteration.
-  /// @param[in,out] total_transforms the product of the transformations applied from the beginning of processing.
-  /// @param[in] span_id the part of the job that must be done.
-  /// @param[in] total_spans the total number of parts into which the job is subdivided.
-  static void TransformCloudSpan(PointCloudPtrVector & clouds,const PointNeighCloud & sets,const DynamicPointMatrix centroids,
-    const WeightFuncPtr & weight_func,TransformationMatrixVector & cur_transforms,
-    TransformationMatrixVector & total_transforms,int span_id,int total_spans)
-    {
-    int cloud_count = clouds.size();
-    int from_cloud_idx = NSimpleThreadManager::GetTaskSpanFirst(cloud_count,span_id,total_spans);
-    int to_cloud_idx = NSimpleThreadManager::GetTaskSpanFirst(cloud_count,span_id + 1,total_spans);
-
-    DynamicPointMatrix local_centroids;
-    DynamicPointMatrix local_points;
-    DynamicColVector local_weights;
-
-    for (int cloud_idx = from_cloud_idx; cloud_idx < to_cloud_idx; cloud_idx++)
-      {
-      ComputeCentroidsForCloud(clouds,sets,cloud_idx,centroids,local_points,local_centroids);
-      if (weight_func)
-        ComputeWeights(clouds,sets,cloud_idx,weight_func,local_weights);
-
-      cur_transforms[cloud_idx] = weight_func ? PointsToCentroidsWeighted(local_points,local_centroids,local_weights) :
-        PointsToCentroids(local_points,local_centroids);
-      pcl::transformPointCloud(*(clouds[cloud_idx]),*(clouds[cloud_idx]),cur_transforms[cloud_idx]);
-      total_transforms[cloud_idx] = cur_transforms[cloud_idx] * total_transforms[cloud_idx];
-      }
-    }
-
-  /// Initializes a subset of the KdTrees.
-  /// @param[in] clouds the clouds.
-  /// @param[out] trees the produced trees.
-  /// @param[in] span_id the part of the job that must be done.
-  /// @param[in] total_spans the total number of parts into which the job is subdivided.
-  static void InitKdTreeSpan(const PointCloudPtrVector & clouds,std::vector<KdTreePtr> & trees,
-    int span_id,int total_spans)
-    {
-    int tree_count = trees.size();
-    int from_tree_idx = NSimpleThreadManager::GetTaskSpanFirst(tree_count,span_id,total_spans);
-    int to_tree_idx = NSimpleThreadManager::GetTaskSpanFirst(tree_count,span_id + 1,total_spans);
-
-    for (int i = from_tree_idx; i < to_tree_idx; i++)
-      {
-      trees[i] = KdTreePtr(new KdTree());
-      trees[i]->setInputCloud(clouds[i]);
-      }
-    }
-
-  /// Computes the mutual nearest neighborhood relation graph.
-  /// <BR>
-  /// For each cloud and for each point in that cloud
-  /// a vector of int is produced, with one element for each cloud.
-  /// Each element contains the index of the mutual nearest neighbor
-  /// in the cloud for the point, or NO_POINT if none found.
-  /// NOTE: a point is not the nearest neighbor of itself,
-  ///       so graph[a][b][a] is always NO_POINT.
-  /// @param[in] clouds the clouds.
-  /// @param[out] graph the graph produced.
-  /// @param[in] trees the KdTrees that must be used for searching.
-  /// @param[in,out] thread_manager the thread manager.
-  static void ComputePointGraph(const PointCloudPtrVector & clouds,PointNeighGraph & graph,
-    std::vector<KdTreePtr> &trees,ThreadManager & thread_manager)
-    {
-    const int cloud_count = clouds.size();
-    if (cloud_count <= 0)
-      return;
-
-    // reinitialize the graph
-    graph.resize(cloud_count);
-    for (int i = 0; i < cloud_count; i++)
-      {
-      int cloudsize = clouds[i]->size();
-      graph[i].resize(cloudsize);
-      for (int h = 0; h < cloudsize; h++)
-        {
-        graph[i][h].resize(cloud_count);
-        for (int k = 0; k < cloud_count; k++)
-          graph[i][h][k] = NO_POINT;
-        }
-      }
-
-    // create the KdTrees for nearest neighbor search
-    trees.resize(cloud_count);
-    thread_manager.ExecuteAction(THREAD_ACTION_INIT_KDTREES);
-
-    thread_manager.ExecuteAction(THREAD_ACTION_COMPUTE_POINT_GRAPH);
     }
 
   /// Finds the independent sets of mutual neighbor point,
@@ -614,7 +570,7 @@ class ICPGPARegistration
 
     centroids.resize(Eigen::NoChange,set_count);
 
-    // TODO: make this multithreaded, maybe
+    #pragma omp parallel for
     for (int set_idx = 0; set_idx < set_count; set_idx++)
       {
       centroids.col(set_idx) = PointVector::Zero();
@@ -688,7 +644,6 @@ class ICPGPARegistration
     weights.resize(set_count);
 
     int actual_count = 0;
-
     for (int set_idx = 0; set_idx < set_count; set_idx++)
       if (sets[set_idx][cloud_idx] != NO_POINT)
         {
@@ -855,34 +810,10 @@ class ICPGPARegistration
     return result;
     }
 
-  /// Returns the number of thread that will be used,
-  /// as passed to the constructor.
-  int GetThreadCount() {return m_thread_manager.GetThreadCount(); }
-
   private:
   // disable default constructors.
   ICPGPARegistration() {}
   ICPGPARegistration(const SelfType & other) {}
-
-  static void ThreadFunction(int thread_id,int action,SelfType * &data)
-    {
-    switch (action)
-      {
-      case THREAD_ACTION_COMPUTE_POINT_GRAPH:
-        ComputePointGraphSpan(data->m_clouds,data->m_graph,data->m_trees,data->m_euclidean_threshold,
-          thread_id,data->GetThreadCount());
-        break;
-      case THREAD_ACTION_INIT_KDTREES:
-        InitKdTreeSpan(data->m_clouds,data->m_trees,thread_id,data->GetThreadCount());
-        break;
-      case THREAD_ACTION_PROCESS_CLOUD_SPAN:
-        TransformCloudSpan(data->m_clouds,data->m_sets,data->m_centroids,data->m_weight_func,
-        data->m_last_transformations,data->m_transformations,thread_id,data->GetThreadCount());
-        break;
-      default:
-        break;
-      }
-    }
 
   TransformationMatrixVector m_transformations;
   TransformationMatrixVector m_last_transformations;
@@ -898,8 +829,6 @@ class ICPGPARegistration
   int m_num_of_clouds;
 
   Real m_euclidean_threshold;
-
-  ThreadManager m_thread_manager;
 
   ListenerContainer m_listeners;
 
