@@ -85,16 +85,26 @@ class ICPGPARegistration
   class WeightFunc
     {
     public:
-    /// Computes the weight associated to the set
-    /// i. e. calculates the likelihood that the association
-    /// described in the set is correct.
+    /// Computes the weight associated to the set and the specific cloud
+    /// i. e. calculates the likelihood that the point insertion
+    /// into the set is correct.
     /// @warning may be called by multiple thread simultaneously!
     /// @param[in] clouds the clouds
     /// @param[in] cloud_idx the specific cloud for which the weight must be calculated
     /// @param[in] set the set
+    /// @param[in] set_weight the weight calculated for the same set by ComputeWeight
     /// @returns a real value between 0.0 and 1.0
-    virtual Real ComputeWeight(const PointCloudPtrVector & clouds,int cloud_idx,
-      const PointNeighVector & set) = 0;
+    virtual Real ComputeWeightForCloud(const PointCloudPtrVector & clouds,int cloud_idx,
+      const PointNeighVector & set,const Real set_weight) = 0;
+
+    /// Computes the weight associated to a set
+    /// i. e. calculates the likelihood that the association
+    /// described in the set is correct.
+    /// @warning may be called by multiple thread simultaneously!
+    /// @param[in] clouds the clouds
+    /// @param[in] set the set
+    /// @returns a real value between 0.0 and 1.0
+    virtual Real ComputeWeight(const PointCloudPtrVector & clouds,const PointNeighVector & set) = 0;
     };
 
   typedef boost::shared_ptr<WeightFunc> WeightFuncPtr;
@@ -114,6 +124,7 @@ class ICPGPARegistration
     virtual void onComputedGraph(int /*iteration*/,const PointNeighGraph & /*graph*/) {}
     virtual void onFoundIndependentSets(int /*iteration*/,const PointNeighCloud & /*sets*/) {}
     virtual void onComputedCentroids(int /*iteration*/,const DynamicPointMatrix & /*centroids*/) {}
+    virtual void onComputedWeights(int /*iteration*/,const DynamicColVector & /*weights*/) {}
 
     virtual void onTransformedCloud(int /*iteration*/,int /*cloudid*/,const TransformationMatrix & /*matrix*/,
       const PointCloud & /*newcloud*/) {}
@@ -139,6 +150,8 @@ class ICPGPARegistration
       {for (size_type i = 0; i < this->size(); i++) (*this)[i]->onFoundIndependentSets(iteration,sets); }
     virtual void onComputedCentroids(int iteration,const DynamicPointMatrix & centroids)
       {for (size_type i = 0; i < this->size(); i++) (*this)[i]->onComputedCentroids(iteration,centroids); }
+    virtual void onComputedWeights(int iteration,const DynamicColVector & weights)
+      {for (size_type i = 0; i < this->size(); i++) (*this)[i]->onComputedWeights(iteration,weights); }
 
     virtual void onTransformedCloud(int iteration,int cloudid,const TransformationMatrix & matrix,
       const PointCloud & newcloud)
@@ -323,7 +336,15 @@ class ICPGPARegistration
       ComputeCentroids(m_clouds,m_sets,m_centroids);
       m_listeners.onComputedCentroids(step,m_centroids);
 
-      TransformClouds(m_clouds,m_sets,m_centroids,m_weight_func,m_last_transformations,m_transformations);
+      if (m_weight_func)
+        {
+        ComputeWeights(m_clouds,m_sets,m_weight_func,m_weights);
+        m_listeners.onComputedWeights(step,m_weights);
+        }
+
+      TransformClouds(m_clouds,m_sets,m_centroids,m_weight_func,m_weights,
+        m_last_transformations,m_transformations);
+
       #pragma omp parallel for
       for (int i = 0; i < m_num_of_clouds; i++)
         m_listeners.onTransformedCloud(step,i,m_last_transformations[i],*(m_clouds[i]));
@@ -342,10 +363,12 @@ class ICPGPARegistration
   /// @param[in] sets the sets.
   /// @param[in] centroids the centroids.
   /// @param[in] weight_func the weight function, or WeightFuncPtr(NULL) if none.
+  /// @param[in] weights the weights computed with only data about the sets.
   /// @param[out] cur_transforms the transformations applied during this iteration.
   /// @param[in,out] total_transforms the product of the transformations applied from the beginning of processing.
   static void TransformClouds(PointCloudPtrVector & clouds,const PointNeighCloud & sets,const DynamicPointMatrix centroids,
-    const WeightFuncPtr & weight_func,TransformationMatrixVector & cur_transforms,TransformationMatrixVector & total_transforms)
+    const WeightFuncPtr & weight_func,const DynamicColVector & weights,
+    TransformationMatrixVector & cur_transforms,TransformationMatrixVector & total_transforms)
     {
     int cloud_count = clouds.size();
 
@@ -358,9 +381,7 @@ class ICPGPARegistration
       #pragma omp for
       for (int cloud_idx = 0; cloud_idx < cloud_count; cloud_idx++)
         {
-        ComputeCentroidsForCloud(clouds,sets,cloud_idx,centroids,local_points,local_centroids);
-        if (weight_func)
-          ComputeWeights(clouds,sets,cloud_idx,weight_func,local_weights);
+        ComputeCentroidsForCloud(clouds,sets,cloud_idx,centroids,weight_func,weights,local_points,local_centroids,local_weights);
 
         cur_transforms[cloud_idx] = weight_func ? PointsToCentroidsWeighted(local_points,local_centroids,local_weights) :
           PointsToCentroids(local_points,local_centroids);
@@ -417,7 +438,7 @@ class ICPGPARegistration
 
     for (int source_cloud_idx = 0; source_cloud_idx < cloud_count; source_cloud_idx++)
       {
-      int source_cloud_size = clouds[source_cloud_idx]->size();
+      const int source_cloud_size = clouds[source_cloud_idx]->size();
       #pragma omp parallel for
       for (int src_point_idx = 0; src_point_idx < source_cloud_size; src_point_idx++)
         {
@@ -589,17 +610,24 @@ class ICPGPARegistration
 
   /// Produces two matrices, one containing the interesting points of the cloud
   /// and the other the corresponding centroids to which the points should be moved.
+  /// If a weight function is defined, it additionally produces the weight of each match.
   /// @param[in] clouds the clouds (only cloud cloud_idx will be used).
   /// @param[in] sets the independent sets.
   /// @param[in] cloud_idx the index of the cloud in clouds that must be used.
   /// @param[in] centroids the centroid matrix, one for each set in sets.
+  /// @param[in] weightfunc the pointer to the weight function or WeightFuncPtr(NULL) if none.
+  /// @param[in] weights the weights computed using only data about the sets.
   /// @param[out] local_points the interesting points.
   /// @param[out] local_centroids the corresponding centroids.
+  /// @param[out] local_weights the weights, in a column vector.
   static void ComputeCentroidsForCloud(const PointCloudPtrVector & clouds,const PointNeighCloud & sets,
     const int cloud_idx,const DynamicPointMatrix & centroids,
-    DynamicPointMatrix & local_points,DynamicPointMatrix & local_centroids)
+    const WeightFuncPtr & weightfunc,const DynamicColVector & weights,
+    DynamicPointMatrix & local_points,DynamicPointMatrix & local_centroids,
+    DynamicColVector & local_weights)
     {
     const int set_count = sets.size();
+    const bool has_weight_func = weightfunc;
 
     // the amount of points produced is limited from above
     // by both the number of sets
@@ -611,6 +639,9 @@ class ICPGPARegistration
     local_centroids.resize(Eigen::NoChange,estimated_count);
     local_points.resize(Eigen::NoChange,estimated_count);
 
+    if (has_weight_func)
+      local_weights.resize(estimated_count);
+
     int counter = 0;
 
     int tpx;
@@ -620,39 +651,37 @@ class ICPGPARegistration
         {
         local_centroids.col(counter) = centroids.col(set_idx);
         local_points.col(counter) = PointTToEigen(clouds[cloud_idx]->points[tpx]);
+
+        if (has_weight_func)
+          local_weights[counter] = weightfunc->ComputeWeightForCloud(clouds,cloud_idx,sets[set_idx],weights[set_idx]);
+
         counter++;
         }
 
     // resize to the actual size
     local_centroids.conservativeResize(Eigen::NoChange,counter);
     local_points.conservativeResize(Eigen::NoChange,counter);
+    if (has_weight_func)
+      local_weights.conservativeResize(counter);
     }
 
-  /// Produces the a weight for each set.
+  /// Produces the weight for each set.
   /// @param[in] clouds the clouds.
-  /// @param[in] sets the sets.
-  /// @param[in] cloud_idx the specific cloud for which the weights must be computed.
+  /// @param[in] sets the independent sets.
   /// @param[in] weightfunc the pointer to the weight function.
-  /// @param[out] weights the produced weights, in a column vector, in the same order as
-  ///        the sets.
+  /// @param[out] weights the weights, in a column vector, one for each set.
   static void ComputeWeights(const PointCloudPtrVector & clouds,const PointNeighCloud & sets,
-    const int cloud_idx,const WeightFuncPtr & weightfunc,DynamicColVector & weights)
+    const WeightFuncPtr & weightfunc, DynamicColVector & weights)
     {
     const int set_count = sets.size();
 
-    // estimate
     weights.resize(set_count);
 
-    int actual_count = 0;
+    #pragma omp parallel for
     for (int set_idx = 0; set_idx < set_count; set_idx++)
-      if (sets[set_idx][cloud_idx] != NO_POINT)
-        {
-        weights[actual_count] = weightfunc->ComputeWeight(clouds,cloud_idx,sets[set_idx]);
-        actual_count++;
-        }
-
-    // actual resize
-    weights.conservativeResize(actual_count);
+      {
+      weights[set_idx] = weightfunc->ComputeWeight(clouds,sets[set_idx]);
+      }
     }
 
   /// Computes the Mean Square distance between the centroids
@@ -821,6 +850,7 @@ class ICPGPARegistration
   PointNeighGraph m_graph;
   PointNeighCloud m_sets;
   DynamicPointMatrix m_centroids;
+  DynamicColVector m_weights;
 
   PointCloudPtrVector m_clouds;
 
